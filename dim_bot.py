@@ -276,11 +276,19 @@ def stage_text(data, row):
 
 
 def chapter_table(data, sd, chapter):
-    rows = [["스테이지", "추천 전투력", "명중", "집중"]]
-    for r in sd.chapters[chapter]:
-        rows.append([f"{chapter}-{r['stage']}", fmt_kr(r["recommended_cp"]), f"{r['accuracy']:,}", f"{r['focus']:,}"])
-    body = table(rows, right_cols={1, 2, 3})
-    return f"챕터 {chapter} 투력컷 (추천 전투력 = 피해 100%. 자세히: !스테 {chapter}-N)\n```\n{body}\n```"
+    """챕터 30개 스테이지의 피해량 15/35/55/75/100% 전투력 표. 명중·집중은 챕터 안에서 거의 같아서 제목 줄에."""
+    rows_data = sd.chapters[chapter]
+    rows = [["스테"] + [data.damage_label(p) for p in CP_COLUMNS]]
+    for r in rows_data:
+        rows.append([str(r["stage"])] + [fmt_kr(cp_at(r, p)) for p in CP_COLUMNS])
+    body = table(rows, right_cols=set(range(len(rows[0]))))
+
+    def rng(vals):
+        return f"{min(vals):,}" if len(vals) == 1 else f"{min(vals):,}~{max(vals):,}"
+
+    head = (f"챕터 {chapter} 투력컷 · 명중 {rng({r['accuracy'] for r in rows_data})} · "
+            f"집중 {rng({r['focus'] for r in rows_data})}  (열 = 피해량 %, 한 스테이지만: {chapter}-N)")
+    return f"{head}\n```\n{body}\n```"
 
 
 def build_stage_reply(data, sd, text):
@@ -736,7 +744,11 @@ def selftest():
         ct = chapter_table(data, sd, 212)
         print("\n" + ct)
         check("chapter table < 2000", len(ct) < 2000, True)
-        check("chapter table rows", ct.count("\n212-"), 30)
+        check("chapter table rows", ct.count("\n"), 33)          # 제목 + ``` + 헤더 + 30행 + ```
+        check("chapter table has 100% col", "5.7343억" in ct, True)
+        check("chapter table has 20% col", "1.1469억" in ct, True)
+        longest = max((len(chapter_table(data, sd, ch)), ch) for ch in sd.chapters)
+        check(f"all chapter tables < 2000 (longest {longest[0]} @ {longest[1]})", longest[0] < 2000, True)
         check("parse stage 212-15", parse_stage("212-15"), (212, 15))
         check("parse stage 212 15", parse_stage("212 15"), (212, 15))
         check("parse stage 212", parse_stage("212"), (212, None))
