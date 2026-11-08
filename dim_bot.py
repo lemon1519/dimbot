@@ -301,7 +301,7 @@ def build_stage_reply(data, sd, text):
     return {"stage_row": row}
 
 
-BARE_RE = re.compile(r"\s*\d{1,3}\s*층?\s*(?:[-~–]\s*\d{1,3}\s*층?\s*)?")
+BARE_RE = re.compile(r"\s*(\d{1,3})\s*층?\s*(?:[-~–]\s*(\d{1,3})\s*층?\s*)?")
 
 
 def bare_floors(text):
@@ -309,6 +309,28 @@ def bare_floors(text):
     if not text or len(text) > 16 or not BARE_RE.fullmatch(text):
         return None
     return parse_floors(text)
+
+
+def classify_bare(text, max_floor, sd):
+    """숫자만 있는 메시지를 차원 층/일반 스테이지로 나눔 → ("dim", 텍스트) / ("stage", 텍스트) / None.
+    규칙: '층' 이 붙었거나 100 이하 한 숫자 → 차원.  101 이상 한 숫자 → 챕터 표.
+    'A-B' 는 A가 101 이상이거나 (A > B 이고 B ≤ 30) 이면 스테이지 A-B, 아니면 차원 A~B층 범위."""
+    if not text or len(text) > 16:
+        return None
+    m = BARE_RE.fullmatch(text)
+    if not m:
+        return None
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) else None
+    if "층" in text or sd is None:
+        return ("dim", text)
+    if b is None:
+        if a > max_floor and a in sd.chapters:
+            return ("stage", str(a))
+        return ("dim", text)
+    if (a > max_floor or (a > b and b <= 30)) and sd.get(a, b):
+        return ("stage", f"{a}-{b}")
+    return ("dim", text)
 
 
 def load_channel_filter(path=CHANNELS_PATH):
@@ -576,12 +598,20 @@ def run_bot(token):
     async def on_message(message):
         if message.author.bot:
             return
-        if bare_floors(message.content) and channel_allowed(message.channel, allowed_channels):
-            r = build_reply(data, message.content)
-            if "stage" in r:
-                await send_reply(message, embed=make_embed(r["stage"]))
-            elif "text" in r:
-                await send_reply(message, content=r["text"])
+        kind = classify_bare(message.content, data.max_floor(), sd)
+        if kind and channel_allowed(message.channel, allowed_channels):
+            if kind[0] == "stage":
+                r = build_stage_reply(data, sd, kind[1])
+                if "stage_row" in r:
+                    await send_reply(message, embed=make_stage_embed(r["stage_row"]))
+                elif "text" in r:
+                    await send_reply(message, content=r["text"])
+            else:
+                r = build_reply(data, kind[1])
+                if "stage" in r:
+                    await send_reply(message, embed=make_embed(r["stage"]))
+                elif "text" in r:
+                    await send_reply(message, content=r["text"])
             return                      # 없는 층·너무 긴 범위는 조용히 무시 (일반 잡담일 수 있음)
         await bot.process_commands(message)
 
@@ -716,6 +746,18 @@ def selftest():
         check("stage reply bad chapter", "error" in build_stage_reply(data, sd, "9999"), True)
         check("stage reply bad stage", "error" in build_stage_reply(data, sd, "212-31"), True)
         check("stage reply no data", "error" in build_stage_reply(data, None, "212-15"), True)
+        mf = data.max_floor(now)
+        check("bare 32 → dim", classify_bare("32", mf, sd), ("dim", "32"))
+        check("bare 32층 → dim", classify_bare("32층", mf, sd), ("dim", "32층"))
+        check("bare 30-35 → dim range", classify_bare("30-35", mf, sd), ("dim", "30-35"))
+        check("bare 212-15 → stage", classify_bare("212-15", mf, sd), ("stage", "212-15"))
+        check("bare 212 → chapter", classify_bare("212", mf, sd), ("stage", "212"))
+        check("bare 12-5 → stage", classify_bare("12-5", mf, sd), ("stage", "12-5"))
+        check("bare 5-12 → dim range", classify_bare("5-12", mf, sd), ("dim", "5-12"))
+        check("bare 999 → dim (silent error)", classify_bare("999", mf, sd), ("dim", "999"))
+        check("bare 212-31 → dim (no such stage)", classify_bare("212-31", mf, sd), ("dim", "212-31"))
+        check("bare chat → None", classify_bare("212-15 맞음?", mf, sd), None)
+        check("bare no stage data → dim", classify_bare("212-15", mf, None), ("dim", "212-15"))
     # 명령 파싱/오류
     check("parse 32", parse_floors("32"), (32, 32))
     check("parse 32층", parse_floors("32층"), (32, 32))
