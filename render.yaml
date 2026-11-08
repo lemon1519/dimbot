@@ -1,0 +1,14 @@
+# Render 블루프린트: render.com → New → Blueprint → 이 저장소 선택 → DISCORD_TOKEN 입력 → Apply
+services:
+  - type: web
+    name: dimbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -I dim_bot.py
+    healthCheckPath: /
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.7
