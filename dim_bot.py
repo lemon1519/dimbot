@@ -9,6 +9,8 @@ r"""쿠키런: 크럼블 차원의 이면 투력컷 디스코드 봇.
   32  또는  30-35          (숫자만 있는 메시지에 바로 반응. channels.txt 로 채널 제한 가능)
   /투력컷 층:32        !투력컷 32      !컷 32
   /투력컷 층:30-35     !투력컷 30-35   !컷 30-35     (범위는 한 번에 최대 20층)
+  /스테이지 챕터:212 스테이지:15     !스테이지 212-15   !스테 212-15     (일반 스테이지 투력컷)
+  /스테이지 챕터:212                 !스테 212                          (챕터 전체 30개 표)
 
 데이터: dim_stages.json (build_data.py 가 클라 데이터에서 생성).
 """
@@ -22,6 +24,7 @@ import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_PATH = os.path.join(HERE, "dim_stages.json")
+STAGE_PATH = os.path.join(HERE, "stage_cp.json")      # 일반 스테이지 추천 전투력 (없어도 봇은 돎)
 TOKEN_PATH = os.path.join(HERE, "token.txt")
 CHANNELS_PATH = os.path.join(HERE, "channels.txt")   # 숫자만 친 메시지에 반응할 채널 (비우면 전부)
 LOG_PATH = os.path.join(HERE, "dimbot.log")          # 창 없이(pythonw) 돌릴 때 출력
@@ -75,6 +78,29 @@ class DimData:
     def damage_label(self, cp_pct):
         v = self.damage_pct.get(cp_pct)
         return f"{v:g}%" if v is not None else f"투력 {cp_pct}%"
+
+
+class StageData:
+    """일반 스테이지(챕터-스테이지) 추천 전투력. stage_cp.json 이 없으면 None 으로 둔다."""
+    def __init__(self, path=STAGE_PATH):
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        self.bosses = d["bosses"]
+        self.by = {}
+        self.chapters = {}
+        for ch, st, cp, acc, foc, bi in d["rows"]:
+            row = {"chapter": ch, "stage": st, "recommended_cp": cp, "accuracy": acc, "focus": foc,
+                   "boss": self.bosses[bi]}
+            self.by[(ch, st)] = row
+            self.chapters.setdefault(ch, []).append(row)
+        self.max_chapter = max(self.chapters)
+
+    @classmethod
+    def load_or_none(cls, path=STAGE_PATH):
+        return cls(path) if os.path.exists(path) else None
+
+    def get(self, chapter, stage):
+        return self.by.get((chapter, stage))
 
 
 # ───────────────────────── 포맷 ─────────────────────────
@@ -224,6 +250,55 @@ def parse_floors(text):
     if hi < lo:
         lo, hi = hi, lo
     return lo, hi
+
+
+STAGE_USAGE = "예: `!스테 212-15` (212챕터 15스테이지), `!스테 212` (챕터 전체), `/스테이지 챕터:212 스테이지:15`"
+
+
+def parse_stage(text):
+    """'212-15', '212 15', '212' → (챕터, 스테이지|None). 아니면 None."""
+    t = (text or "").strip()
+    for w in ("챕터", "스테이지", "스테", "장", "화"):
+        t = t.replace(w, " ")
+    m = re.fullmatch(r"\s*(\d{1,4})\s*(?:[-~–\s]\s*(\d{1,2}))?\s*", t)
+    if not m:
+        return None
+    return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+
+
+def stage_title(row):
+    return f"스테이지 {row['chapter']}-{row['stage']} 투력컷"
+
+
+def stage_text(data, row):
+    return "\n".join([stage_title(row), cut_block(data, row),
+                      f"명중 {row['accuracy']:,} | 집중 {row['focus']:,}", f"보스: {row['boss']}"])
+
+
+def chapter_table(data, sd, chapter):
+    rows = [["스테이지", "추천 전투력", "명중", "집중"]]
+    for r in sd.chapters[chapter]:
+        rows.append([f"{chapter}-{r['stage']}", fmt_kr(r["recommended_cp"]), f"{r['accuracy']:,}", f"{r['focus']:,}"])
+    body = table(rows, right_cols={1, 2, 3})
+    return f"챕터 {chapter} 투력컷 (추천 전투력 = 피해 100%. 자세히: !스테 {chapter}-N)\n```\n{body}\n```"
+
+
+def build_stage_reply(data, sd, text):
+    """-> {"stage_row": row} / {"text": str} / {"error": str}"""
+    if sd is None:
+        return {"error": "스테이지 데이터(stage_cp.json)가 없어. build_data.py 를 돌려야 함."}
+    ps = parse_stage(text)
+    if not ps:
+        return {"error": "챕터-스테이지 번호를 줘. " + STAGE_USAGE}
+    ch, st = ps
+    if ch not in sd.chapters:
+        return {"error": f"{ch}챕터는 없어. 1~{sd.max_chapter}챕터까지 있음."}
+    if st is None:
+        return {"text": chapter_table(data, sd, ch)}
+    row = sd.get(ch, st)
+    if row is None:
+        return {"error": f"{ch}-{st}는 없어. 챕터당 스테이지는 1~{len(sd.chapters[ch])}."}
+    return {"stage_row": row}
 
 
 BARE_RE = re.compile(r"\s*\d{1,3}\s*층?\s*(?:[-~–]\s*\d{1,3}\s*층?\s*)?")
@@ -418,6 +493,7 @@ def run_bot(token):
     from discord.ext import commands
 
     data = DimData()
+    sd = StageData.load_or_none()
     allowed_channels = load_channel_filter()
     intents = discord.Intents.default()
     intents.message_content = True          # !명령어·숫자 반응용 (개발자 포털에서 MESSAGE CONTENT INTENT 켜야 함)
@@ -448,6 +524,23 @@ def run_bot(token):
         r = build_reply(data, text)
         if "stage" in r:
             return {"embed": make_embed(r["stage"])}, False
+        if "text" in r:
+            return {"content": r["text"]}, False
+        return {"content": r["error"]}, True
+
+    def make_stage_embed(row):
+        e = discord.Embed(title=stage_title(row), color=EMBED_COLOR)
+        e.add_field(name="피해량별 필요 전투력", value=f"```\n{cut_block(data, row)}\n```", inline=False)
+        e.add_field(name="명중", value=f"**{row['accuracy']:,}**", inline=True)
+        e.add_field(name="집중", value=f"**{row['focus']:,}**", inline=True)
+        e.add_field(name="보스", value=row["boss"], inline=False)
+        e.set_footer(text="일반 스테이지 · 전투력이 추천의 N% 이상이면 피해량 %")
+        return e
+
+    def stage_payload(text):
+        r = build_stage_reply(data, sd, text)
+        if "stage_row" in r:
+            return {"embed": make_stage_embed(r["stage_row"])}, False
         if "text" in r:
             return {"content": r["text"]}, False
         return {"content": r["error"]}, True
@@ -507,6 +600,17 @@ def run_bot(token):
     @bot.command(name="투력컷", aliases=["컷"])
     async def prefix_cut(ctx, *, arg: str = ""):
         kw, _ = payload(arg)
+        await send_reply(ctx.message, **kw)
+
+    @bot.tree.command(name="스테이지", description="일반 스테이지 투력컷 (챕터만 주면 챕터 전체 표)")
+    @app_commands.describe(챕터="챕터 번호 (예: 212)", 스테이지="스테이지 번호 1~30 (비우면 챕터 전체)")
+    async def slash_stage(interaction: discord.Interaction, 챕터: int, 스테이지: int = 0):
+        kw, is_err = stage_payload(f"{챕터}-{스테이지}" if 스테이지 else str(챕터))
+        await interaction.response.send_message(**kw, ephemeral=is_err)
+
+    @bot.command(name="스테이지", aliases=["스테", "챕터"])
+    async def prefix_stage(ctx, *, arg: str = ""):
+        kw, _ = stage_payload(arg)
         await send_reply(ctx.message, **kw)
 
     @bot.event
@@ -590,6 +694,28 @@ def selftest():
             check(f"{n}층 조각 수", (s["reward"][0]["name"], s["reward"][0]["amount"]), ("차원의 조각", exp))
         check(f"{n}층 치명저항 규칙", s["crit_resist_pct"], (n - 1) * 10)
 
+    # 일반 스테이지
+    sd = StageData.load_or_none()
+    check("stage data present", sd is not None, True)
+    if sd is not None:
+        check("stage rows", len(sd.by), 12720)
+        check("stage 1-1 cp", fmt_kr(sd.get(1, 1)["recommended_cp"]), "1,600")
+        check("stage 424-30 cp", fmt_kr(sd.get(424, 30)["recommended_cp"]), "1,055억")
+        check("stage 424-30 acc", sd.get(424, 30)["accuracy"], 1204)
+        print("\n" + stage_text(data, sd.get(212, 15)))
+        ct = chapter_table(data, sd, 212)
+        print("\n" + ct)
+        check("chapter table < 2000", len(ct) < 2000, True)
+        check("chapter table rows", ct.count("\n212-"), 30)
+        check("parse stage 212-15", parse_stage("212-15"), (212, 15))
+        check("parse stage 212 15", parse_stage("212 15"), (212, 15))
+        check("parse stage 212", parse_stage("212"), (212, None))
+        check("parse stage 212챕터 15스테이지", parse_stage("212챕터 15스테이지"), (212, 15))
+        check("stage reply row", "stage_row" in build_stage_reply(data, sd, "212-15"), True)
+        check("stage reply chapter", "text" in build_stage_reply(data, sd, "212"), True)
+        check("stage reply bad chapter", "error" in build_stage_reply(data, sd, "9999"), True)
+        check("stage reply bad stage", "error" in build_stage_reply(data, sd, "212-31"), True)
+        check("stage reply no data", "error" in build_stage_reply(data, None, "212-15"), True)
     # 명령 파싱/오류
     check("parse 32", parse_floors("32"), (32, 32))
     check("parse 32층", parse_floors("32층"), (32, 32))
